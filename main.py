@@ -223,17 +223,21 @@ async def process_code(message: types.Message, state: FSMContext):
         logger.info(f"[User {message.from_user.id}] Проверка кода: {code}")
         result = await client.sign_in(phone_number=data['phone'], phone_code_hash=data['phone_code_hash'], phone_code=code)
         logger.info(f"[User {message.from_user.id}] ✅ ВХОД УСПЕШЕН! Тип: {type(result).__name__}")
-        
+
         await message.answer(
-            "✅ Вы успешно авторизованы!\\n" +
+            "✅ Вы успешно авторизованы!\n" +
             "Теперь можете использовать все функции бота.",
             reply_markup=get_main_kb()
         )
         await state.clear()
     except errors.SessionPasswordNeeded:
         logger.info(f"[User {message.from_user.id}] 2FA требуется")
-        await message.answer("🔐 На аккаунте включена 2-фактор аутентификация.\\nВведите пароль:")
+        await message.answer("🔐 На аккаунте включена 2-фактор аутентификация.\nВведите пароль:")
         await state.set_state(AuthStates.waiting_for_password)
+    except errors.PhoneNumberInvalid:
+        logger.error(f"Неверный номер телефона: {data.get('phone')}")
+        await message.answer("❌ Неверный номер телефона. Попробуйте снова с /start")
+        await state.clear()
     except errors.PhoneCodeInvalid:
         logger.warning(f"[User {message.from_user.id}] ❌ Неверный код")
         attempts = (await state.get_data()).get('attempts', 0) + 1
@@ -242,19 +246,12 @@ async def process_code(message: types.Message, state: FSMContext):
             await message.answer("❌ Слишком много попыток. Начните заново: /start")
             await state.clear()
         else:
-            await message.answer(f"❌ Неверный код ({attempts}/3).\\nПопробуйте еще раз:")
+            await message.answer(f"❌ Неверный код ({attempts}/3).\nПопробуйте еще раз:")
     except errors.CodeExpired:
         await message.answer("❌ Код истёк. Нажмите кнопку 'Отправить код повторно' или запустите /start")
     except Exception as e:
-        logger.error(f"[User {message.from_user.id}] ❌ Ошибка sign_in: {type(e).__name__}: {str(e)[:80]}")
-        await message.answer(f"❌ Ошибка авторизации:\\n{str(e)[:80]}")
-    except errors.PhoneNumberInvalid:
-        logger.error(f"Неверный номер телефона: {data['phone']}")
-        await message.answer("❌ Неверный номер телефона. Попробуйте снова с /start")
-        await state.clear()
-    except Exception as e:
-        logger.error(f"Ошибка входа: {type(e).__name__}: {e}")
-        await message.answer(f"❌ Ошибка: {str(e)[:100]}")
+        logger.error(f"[User {message.from_user.id}] ❌ Ошибка sign_in: {type(e).__name__}: {str(e)[:200]}")
+        await message.answer(f"❌ Ошибка авторизации:\n{str(e)[:200]}")
 
 @dp.message(AuthStates.waiting_for_password)
 async def process_password(message: types.Message, state: FSMContext):
