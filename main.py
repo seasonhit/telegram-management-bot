@@ -59,6 +59,7 @@ class AuthStates(StatesGroup):
     waiting_for_phone = State()
     waiting_for_code = State()
     waiting_for_password = State()
+    waiting_for_code_type = State()
 
 class ActionStates(StatesGroup):
     waiting_for_msg_target = State()
@@ -91,6 +92,14 @@ def get_auth_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔐 Начать авторизацию", callback_data="start_auth")],
         [InlineKeyboardButton(text="Получить токен (my.telegram.org)", url="http://my.telegram.org")]
+    ])
+
+def get_code_type_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📱 SMS", callback_data="code_sms")],
+        [InlineKeyboardButton(text="☎️ Вызов", callback_data="code_call")],
+        [InlineKeyboardButton(text="💬 Telegram App", callback_data="code_app")],
+        [InlineKeyboardButton(text="↻ Повторная отправка", callback_data="resend_code")]
     ])
 
 def get_ghost_kb(user_id):
@@ -187,8 +196,8 @@ async def process_phone(message: types.Message, state: FSMContext):
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Отправить код повторно", callback_data="resend_code")]])
         dest_text = "SMS" if code_type and "SMS" in code_type.upper() else "уведомление в Telegram"
         await message.answer(
-            f"✅ Код отправлен на {phone} ({dest_text}).\n📱 Введите код из {dest_text}:",
-            reply_markup=kb
+            f"✅ Код отправлен на {phone} ({dest_text}).\n📱 Выберите способ получения кода или введите его:",
+            reply_markup=get_code_type_kb()
         )
         await state.set_state(AuthStates.waiting_for_code)
     except Exception as e:
@@ -327,8 +336,53 @@ async def handle_resend_code(callback: types.CallbackQuery, state: FSMContext):
         code_type = getattr(sent.type, 'name', str(sent.type))
         await state.update_data(phone_code_hash=sent.phone_code_hash, code_type=code_type)
         dest_text = "SMS" if code_type and "SMS" in code_type.upper() else "уведомление в Telegram"
-        await callback.message.answer(f"✅ Код повторно отправлен на {phone} ({dest_text})")
+        await callback.message.edit_text(
+            f"✅ Код повторно отправлен на {phone} ({dest_text}).\n📱 Выберите способ получения кода или введите его:",
+            reply_markup=get_code_type_kb()
+        )
         await callback.answer()
+    except errors.FloodWait as e:
+        logger.warning(f"FloodWait при повторной отправке кода для {uid}: {e.seconds}s")
+        await callback.answer(f"⏳ Частые попытки. Попробуйте через {e.seconds} секунд", show_alert=True)
+    except Exception as e:
+        logger.error(f"Ошибка при повторной отправке кода для {uid}: {type(e).__name__}: {e}")
+        await callback.answer(f"❌ Не удалось отправить код повторно: {type(e).__name__}", show_alert=True)
+
+
+@dp.callback_query(F.data.in_(["code_sms", "code_call", "code_app"]))
+async def handle_code_type_selection(callback: types.CallbackQuery, state: FSMContext):
+    uid = callback.from_user.id
+    data = await state.get_data()
+    client = user_clients.get(uid)
+    if not client or not client.is_connected:
+        await callback.answer("❌ Клиент не подключен. Начните заново: /start", show_alert=True)
+        return
+    
+    phone = data.get('phone')
+    phone_code_hash = data.get('phone_code_hash')
+    if not phone or not phone_code_hash:
+        await callback.answer("❌ Нет данных для выбора типа кода.", show_alert=True)
+        return
+    
+    try:
+        sent = await client.resend_code(phone, phone_code_hash)
+        code_type = getattr(sent.type, 'name', str(sent.type))
+        await state.update_data(phone_code_hash=sent.phone_code_hash, code_type=code_type)
+        
+        type_text = {
+            "SMS": "📱 SMS",
+            "CALL": "☎️ Вызов",
+            "APP": "💬 Telegram App"
+        }.get(code_type, code_type)
+        
+        await callback.message.edit_text(
+            f"✅ Способ получения: {type_text}\n📱 Введите код:",
+            reply_markup=get_code_type_kb()
+        )
+        await callback.answer(f"Выбран способ: {type_text}")
+    except Exception as e:
+        logger.error(f"Ошибка выбора типа кода для {uid}: {type(e).__name__}: {e}")
+        await callback.answer(f"❌ Ошибка: {type(e).__name__}", show_alert=True)
     except errors.FloodWait as e:
         logger.warning(f"FloodWait при повторной отправке кода для {uid}: {e.seconds}s")
         await callback.answer(f"⏳ Частые попытки. Попробуйте через {e.seconds} секунд", show_alert=True)
