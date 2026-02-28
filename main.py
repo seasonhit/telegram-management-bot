@@ -171,21 +171,23 @@ async def process_phone(message: types.Message, state: FSMContext):
         logger.info(f"[{phone}] Отправка кода...")
         await message.answer(f"⏳ Отправляю код на {phone}...")
         
-        # send_code возвращает SentCode с phone_code_hash
+        # send_code возвращает SentCode с phone_code_hash и type (SMS/APP)
         sent_code = await client.send_code(phone)
-        logger.info(f"[{phone}] Код отправлен. Hash: {sent_code.phone_code_hash[:10]}...")
-        
+        code_type = getattr(sent_code.type, 'name', str(sent_code.type))
+        logger.info(f"[{phone}] Код отправлен. Hash: {sent_code.phone_code_hash[:10]}..., type={code_type}")
+
         # Сохраняем данные
         user_clients[user_id] = client
         await state.update_data(
             phone=phone,
-            phone_code_hash=sent_code.phone_code_hash
+            phone_code_hash=sent_code.phone_code_hash,
+            code_type=code_type
         )
-        
+
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Отправить код повторно", callback_data="resend_code")]])
+        dest_text = "SMS" if code_type and "SMS" in code_type.upper() else "уведомление в Telegram"
         await message.answer(
-            f"✅ Код отправлен на {phone}\n" +
-            f"📱 Введите код из SMS или уведомления Telegram:",
+            f"✅ Код отправлен на {phone} ({dest_text}).\n📱 Введите код из {dest_text}:",
             reply_markup=kb
         )
         await state.set_state(AuthStates.waiting_for_code)
@@ -325,12 +327,17 @@ async def handle_resend_code(callback: types.CallbackQuery, state: FSMContext):
         return
     try:
         sent = await client.resend_code(phone, phone_code_hash)
-        await state.update_data(phone_code_hash=sent.phone_code_hash)
-        await callback.message.answer(f"✅ Код отправлен повторно на {phone}")
+        code_type = getattr(sent.type, 'name', str(sent.type))
+        await state.update_data(phone_code_hash=sent.phone_code_hash, code_type=code_type)
+        dest_text = "SMS" if code_type and "SMS" in code_type.upper() else "уведомление в Telegram"
+        await callback.message.answer(f"✅ Код повторно отправлен на {phone} ({dest_text})")
         await callback.answer()
+    except errors.FloodWait as e:
+        logger.warning(f"FloodWait при повторной отправке кода для {uid}: {e.seconds}s")
+        await callback.answer(f"⏳ Частые попытки. Попробуйте через {e.seconds} секунд", show_alert=True)
     except Exception as e:
-        logger.error(f"Ошибка при повторной отправке кода для {uid}: {e}")
-        await callback.answer(f"❌ Не удалось отправить код повторно: {e}", show_alert=True)
+        logger.error(f"Ошибка при повторной отправке кода для {uid}: {type(e).__name__}: {e}")
+        await callback.answer(f"❌ Не удалось отправить код повторно: {type(e).__name__}", show_alert=True)
 
 @dp.message(F.text == "🧹 Очистка")
 async def clear_start(message: types.Message, state: FSMContext):
