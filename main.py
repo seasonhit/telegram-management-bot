@@ -203,9 +203,16 @@ async def process_phone(message: types.Message, state: FSMContext):
     session_path = os.path.join(WORK_DIR, f"session_{user_id}.session")
     if os.path.exists(session_path): os.remove(session_path)
     
+    try:
+        api_id = int(data['api_id'])
+    except (ValueError, KeyError):
+        await message.answer("❌ Ошибка: неверный API ID. Начните заново: /start")
+        await state.clear()
+        return
+    
     client = Client(
         name=f"session_{user_id}",
-        api_id=int(data['api_id']),
+        api_id=api_id,
         api_hash=data['api_hash'],
         phone_number=phone,
         workdir=WORK_DIR,
@@ -213,15 +220,15 @@ async def process_phone(message: types.Message, state: FSMContext):
     )
     
     try:
-        logger.info(f"[{phone}] Подключение...")
+        logger.info(f"[{phone}] Подключение к Telegram...")
         await client.connect()
-        logger.info(f"[{phone}] Отправка кода...")
-        await message.answer(f"⏳ Отправляю код на {phone}...")
+        logger.info(f"[{phone}] Подключение успешно. Отправка кода...")
+        await message.answer(f"⏳ Подключено. Отправляю код на {phone}...\n⏳ Это может занять 10-30 секунд...")
         
-        # send_code возвращает SentCode с phone_code_hash и type (SMS/APP)
+        # send_code отправляет код на номер телефона
         sent_code = await client.send_code(phone)
         code_type = getattr(sent_code.type, 'name', str(sent_code.type))
-        logger.info(f"[{phone}] Код отправлен. Hash: {sent_code.phone_code_hash[:10]}..., type={code_type}")
+        logger.info(f"[{phone}] ✅ Код отправлен успешно! Hash: {sent_code.phone_code_hash[:10]}..., тип: {code_type}")
 
         # Сохраняем данные
         user_clients[user_id] = client
@@ -231,25 +238,28 @@ async def process_phone(message: types.Message, state: FSMContext):
             code_type=code_type
         )
 
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Отправить код повторно", callback_data="resend_code")]])
-        dest_text = "SMS" if code_type and "SMS" in code_type.upper() else "уведомление в Telegram"
+        dest_text = "SMS" if code_type and "SMS" in code_type.upper() else "в приложении Telegram" if code_type and "APP" in code_type.upper() else "по телефону"
         await message.answer(
-            f"✅ Код отправлен на {phone} ({dest_text}).\n📱 Выберите способ получения кода или введите его:",
+            f"✅ Код отправлен на {phone} ({dest_text}).\n\n"
+            f"📱 Вы должны получить код через несколько секунд.\n"
+            f"Введите код или выберите другой способ получения:",
             reply_markup=get_code_type_kb()
         )
         await state.set_state(AuthStates.waiting_for_code)
     except Exception as e:
-        logger.error(f"[{phone}] Ошибка send_code: {type(e).__name__}: {str(e)[:100]}")
+        logger.error(f"[{phone}] ❌ Ошибка send_code: {type(e).__name__}: {str(e)}")
         try:
             await client.disconnect()
         except:
             pass
         await message.answer(
-            f"❌ Ошибка подключения:\n{str(e)[:80]}\n\n" +
-            f"Проверьте:\n" +
-            f"• API ID (на my.telegram.org)\n" +
-            f"• API Hash (на my.telegram.org)\n" +
-            f"• Номер телефона (формат: +7ХХХХХХХХХХ)"
+            f"❌ Не удалось отправить код:\n{type(e).__name__}\n\n{str(e)[:150]}\n\n"
+            f"Проверьте:\n"
+            f"• API ID (должен быть число)\n"
+            f"• API Hash (из http://my.telegram.org)\n"
+            f"• Номер телефона (формат: +7XXXXXXXXXX)\n"
+            f"• Интернет-соединение\n"
+            f"• Лимиты Telegram (максимум 5 запросов в час)"
         )
         await state.clear()
 
@@ -258,47 +268,78 @@ async def process_code(message: types.Message, state: FSMContext):
     data = await state.get_data()
     client = user_clients.get(message.from_user.id)
     if not client or not client.is_connected: 
-        logger.error(f"[User {message.from_user.id}] Клиент не подключен")
-        return await message.answer("❌ Ошибка: Клиент отключен. Нажмите /start")
+        logger.error(f"[User {message.from_user.id}] Клиент не подключен при вводе кода")
+        return await message.answer("❌ Ошибка: сессия потеряна. Начните заново: /start")
     
     import re
-    code = message.text.strip().replace(" ", "").replace("-", "")
+    code = message.text.strip().replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+    
+    # Код может быть 4-10 символов (цифры/буквы)
     if not re.match(r'^[A-Za-z0-9]{4,10}$', code):
-        return await message.answer("❌ Неверный формат кода. Код должен содержать 4–10 букв/цифр. Попробуйте ещё раз:")
+        return await message.answer(
+            "❌ Неверный формат кода.\n"
+            "Код должен содержать 4–10 букв и/или цифр.\n"
+            "Попробуйте еще раз (для повторной отправки используйте кнопку '↻ Повторная отправка'):"
+        )
     
     try:
-        logger.info(f"[User {message.from_user.id}] Проверка кода: {code}")
-        result = await client.sign_in(phone_number=data['phone'], phone_code_hash=data['phone_code_hash'], phone_code=code)
-        logger.info(f"[User {message.from_user.id}] ✅ ВХОД УСПЕШЕН! Тип: {type(result).__name__}")
+        phone = data.get('phone', 'unknown')
+        logger.info(f"[User {message.from_user.id}] Проверка кода: {'*' * 5} (для {phone})")
+        
+        result = await client.sign_in(
+            phone_number=data['phone'],
+            phone_code_hash=data['phone_code_hash'],
+            phone_code=code
+        )
+        logger.info(f"[User {message.from_user.id}] ✅ АВТОРИЗАЦИЯ УСПЕШНА! Результат: {type(result).__name__}")
 
         await message.answer(
-            "✅ Вы успешно авторизованы!\n" +
+            "✅ Вы успешно авторизованы!\n"
             "Теперь можете использовать все функции бота.",
             reply_markup=get_main_kb()
         )
         await state.clear()
     except errors.SessionPasswordNeeded:
-        logger.info(f"[User {message.from_user.id}] 2FA требуется")
-        await message.answer("🔐 На аккаунте включена 2-фактор аутентификация.\nВведите пароль:")
+        logger.info(f"[User {message.from_user.id}] Требуется 2FA пароль")
+        await message.answer(
+            "🔐 На аккаунте включена двухфакторная аутентификация.\n"
+            "Введите ваш пароль:"
+        )
         await state.set_state(AuthStates.waiting_for_password)
     except errors.PhoneNumberInvalid:
         logger.error(f"Неверный номер телефона: {data.get('phone')}")
-        await message.answer("❌ Неверный номер телефона. Попробуйте снова с /start")
+        await message.answer("❌ Неверный номер телефона. Начните заново: /start")
         await state.clear()
     except errors.PhoneCodeInvalid:
-        logger.warning(f"[User {message.from_user.id}] ❌ Неверный код")
+        logger.warning(f"[User {message.from_user.id}] Неверный код: {code}")
         attempts = (await state.get_data()).get('attempts', 0) + 1
         await state.update_data(attempts=attempts)
         if attempts >= 3:
-            await message.answer("❌ Слишком много попыток. Начните заново: /start")
+            await message.answer(
+                "❌ Введено 3 неверных кода.\n"
+                "Начните авторизацию заново: /start"
+            )
             await state.clear()
         else:
-            await message.answer(f"❌ Неверный код ({attempts}/3).\nПопробуйте еще раз:")
+            remaining = 3 - attempts
+            await message.answer(
+                f"❌ Неверный код ({attempts}/3).\n"
+                f"Осталось попыток: {remaining}\n\n"
+                f"💡 Если кода нет, нажмите кнопку '↻ Повторная отправка'"
+            )
     except errors.CodeExpired:
-        await message.answer("❌ Код истёк. Нажмите кнопку 'Отправить код повторно' или запустите /start")
+        logger.warning(f"[User {message.from_user.id}] Код истёк")
+        await message.answer(
+            "❌ Код истёк.\n"
+            "Нажмите кнопку '↻ Повторная отправка' для получения нового кода."
+        )
     except Exception as e:
-        logger.error(f"[User {message.from_user.id}] ❌ Ошибка sign_in: {type(e).__name__}: {str(e)[:200]}")
-        await message.answer(f"❌ Ошибка авторизации:\n{str(e)[:200]}")
+        logger.error(f"[User {message.from_user.id}] Ошибка sign_in: {type(e).__name__}: {str(e)}")
+        await message.answer(
+            f"❌ Ошибка авторизации:\n"
+            f"{type(e).__name__}\n\n"
+            f"{str(e)[:150]}"
+        )
 
 @dp.message(AuthStates.waiting_for_password)
 async def process_password(message: types.Message, state: FSMContext):
@@ -403,6 +444,7 @@ async def handle_code_type_selection(callback: types.CallbackQuery, state: FSMCo
         return
     
     try:
+        logger.info(f"[{uid}] Запрос повторной отправки кода")
         sent = await client.resend_code(phone, phone_code_hash)
         code_type = getattr(sent.type, 'name', str(sent.type))
         await state.update_data(phone_code_hash=sent.phone_code_hash, code_type=code_type)
@@ -418,15 +460,13 @@ async def handle_code_type_selection(callback: types.CallbackQuery, state: FSMCo
             reply_markup=get_code_type_kb()
         )
         await callback.answer(f"Выбран способ: {type_text}")
-    except Exception as e:
-        logger.error(f"Ошибка выбора типа кода для {uid}: {type(e).__name__}: {e}")
-        await callback.answer(f"❌ Ошибка: {type(e).__name__}", show_alert=True)
+        logger.info(f"[{uid}] Код переотправлен способом: {type_text}")
     except errors.FloodWait as e:
-        logger.warning(f"FloodWait при повторной отправке кода для {uid}: {e.seconds}s")
+        logger.warning(f"FloodWait для {uid}: {e.seconds}s")
         await callback.answer(f"⏳ Частые попытки. Попробуйте через {e.seconds} секунд", show_alert=True)
     except Exception as e:
-        logger.error(f"Ошибка при повторной отправке кода для {uid}: {type(e).__name__}: {e}")
-        await callback.answer(f"❌ Не удалось отправить код повторно: {type(e).__name__}", show_alert=True)
+        logger.error(f"Ошибка выбора типа кода для {uid}: {type(e).__name__}: {str(e)[:100]}")
+        await callback.answer(f"❌ Ошибка: {type(e).__name__}\n{str(e)[:80]}", show_alert=True)
 
 @dp.message(F.text == "🧹 Очистка")
 async def clear_start(message: types.Message, state: FSMContext):
