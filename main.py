@@ -222,44 +222,63 @@ async def process_phone(message: types.Message, state: FSMContext):
     try:
         logger.info(f"[{phone}] Подключение к Telegram...")
         await client.connect()
-        logger.info(f"[{phone}] Подключение успешно. Отправка кода...")
-        await message.answer(f"⏳ Подключено. Отправляю код на {phone}...\n⏳ Это может занять 10-30 секунд...")
+        logger.info(f"[{phone}] ✅ Подключено. Отправляю код...")
+        await message.answer(f"⏳ Подключено. Отправляю код на {phone}...")
         
         # send_code отправляет код на номер телефона
+        logger.info(f"[{phone}] Вызов send_code()...")
         sent_code = await client.send_code(phone)
-        code_type = getattr(sent_code.type, 'name', str(sent_code.type))
-        logger.info(f"[{phone}] ✅ Код отправлен успешно! Hash: {sent_code.phone_code_hash[:10]}..., тип: {code_type}")
+        code_type = getattr(sent_code, 'type', None)
+        type_name = getattr(code_type, 'name', str(code_type)) if code_type else 'UNKNOWN'
+        logger.info(f"[{phone}] ✅ send_code() успешен!")
+        logger.info(f"[{phone}] Тип кода: {type_name}, Hash: {sent_code.phone_code_hash[:15]}...")
 
         # Сохраняем данные
         user_clients[user_id] = client
+        phone_code_hash = sent_code.phone_code_hash
+        logger.info(f"[{user_id}] Сохранены данные: phone={phone}, hash_len={len(phone_code_hash)}")
+        
         await state.update_data(
             phone=phone,
-            phone_code_hash=sent_code.phone_code_hash,
-            code_type=code_type
+            phone_code_hash=phone_code_hash,
+            code_type=type_name
         )
 
-        dest_text = "SMS" if code_type and "SMS" in code_type.upper() else "в приложении Telegram" if code_type and "APP" in code_type.upper() else "по телефону"
+        dest_text = "SMS" if type_name and "SMS" in type_name.upper() else "в приложении Telegram" if type_name and "APP" in type_name.upper() else "по номеру"
         await message.answer(
-            f"✅ Код отправлен на {phone} ({dest_text}).\n\n"
-            f"📱 Вы должны получить код через несколько секунд.\n"
-            f"Введите код или выберите другой способ получения:",
+            f"✅ Код отправлен на {phone}\n"
+            f"Доставка: {dest_text}\n\n"
+            f"📱 Введите полученный код (4-10 символов):",
             reply_markup=get_code_type_kb()
         )
         await state.set_state(AuthStates.waiting_for_code)
     except Exception as e:
-        logger.error(f"[{phone}] ❌ Ошибка send_code: {type(e).__name__}: {str(e)}")
+        err_name = type(e).__name__
+        err_msg = str(e)
+        logger.error(f"[{phone}] ❌ {err_name}: {err_msg}")
+        logger.error(f"[{phone}] Полная ошибка: {repr(e)}")
         try:
             await client.disconnect()
         except:
             pass
+        
+        # Определяем помощь в зависимости от ошибки
+        help_text = ""
+        if "auth" in err_msg.lower() or "unauthorized" in err_msg.lower():
+            help_text = "Проверьте API ID и API Hash на http://my.telegram.org"
+        elif "phone" in err_msg.lower():
+            help_text = "Проверьте формат номера: +7XXXXXXXXXX (11 цифр)"
+        elif "flood" in err_msg.lower():
+            help_text = "Слишком много попыток. Подождите 1-2 часа."
+        else:
+            help_text = "Проверьте интернет и пересчитайте API учетные данные"
+        
         await message.answer(
-            f"❌ Не удалось отправить код:\n{type(e).__name__}\n\n{str(e)[:150]}\n\n"
-            f"Проверьте:\n"
-            f"• API ID (должен быть число)\n"
-            f"• API Hash (из http://my.telegram.org)\n"
-            f"• Номер телефона (формат: +7XXXXXXXXXX)\n"
-            f"• Интернет-соединение\n"
-            f"• Лимиты Telegram (максимум 5 запросов в час)"
+            f"❌ Ошибка отправки кода\n"
+            f"Тип: {err_name}\n\n"
+            f"Сообщение: {err_msg[:100]}\n\n"
+            f"💡 {help_text}\n\n"
+            f"Начните заново: /start"
         )
         await state.clear()
 
@@ -272,26 +291,44 @@ async def process_code(message: types.Message, state: FSMContext):
         return await message.answer("❌ Ошибка: сессия потеряна. Начните заново: /start")
     
     import re
-    code = message.text.strip().replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+    raw_input = message.text.strip()
+    code = raw_input.replace(" ", "").replace("-", "").replace("(", "").replace(")", "").replace("/", "")
+    logger.info(f"[{message.from_user.id}] Ввод кода: raw='{raw_input}' → cleaned='{code}'")
     
     # Код может быть 4-10 символов (цифры/буквы)
     if not re.match(r'^[A-Za-z0-9]{4,10}$', code):
+        logger.warning(f"[{message.from_user.id}] ❌ Код не прошел валидацию: '{code}' (4-10 буквенно-цифровых)")
         return await message.answer(
             "❌ Неверный формат кода.\n"
-            "Код должен содержать 4–10 букв и/или цифр.\n"
-            "Попробуйте еще раз (для повторной отправки используйте кнопку '↻ Повторная отправка'):"
+            "Код должен содержать 4–10 букв и/или цифр.\n\n"
+            f"📝 Вы ввели: '{code}' ({len(code)} символов)\n\n"
+            "Попробуйте еще раз:"
         )
     
     try:
         phone = data.get('phone', 'unknown')
-        logger.info(f"[User {message.from_user.id}] Проверка кода: {'*' * 5} (для {phone})")
+        phone_code_hash = data.get('phone_code_hash', '')
+        
+        if not phone or not phone_code_hash:
+            logger.error(f"[{message.from_user.id}] ❌ Критические данные не сохранены!")
+            logger.error(f"[{message.from_user.id}] phone={phone}, phone_code_hash={'SET' if phone_code_hash else 'NOT_SET'}")
+            return await message.answer("❌ Ошибка сессии: потеряны данные авторизации. /start")
+        
+        logger.info(f"[{message.from_user.id}] ========== ПОПЫТКА ВХОДА ==========")
+        logger.info(f"[{message.from_user.id}] Телефон: {phone}")
+        logger.info(f"[{message.from_user.id}] Hash длина: {len(phone_code_hash)}, первые 15 символов: {phone_code_hash[:15]}")
+        logger.info(f"[{message.from_user.id}] Код (очищенный): {code} (длина={len(code)})")
+        logger.info(f"[{message.from_user.id}] Клиент подключен: {client.is_connected}")
+        logger.info(f"[{message.from_user.id}] =====================================")
         
         result = await client.sign_in(
-            phone_number=data['phone'],
-            phone_code_hash=data['phone_code_hash'],
+            phone_number=phone,
+            phone_code_hash=phone_code_hash,
             phone_code=code
         )
-        logger.info(f"[User {message.from_user.id}] ✅ АВТОРИЗАЦИЯ УСПЕШНА! Результат: {type(result).__name__}")
+        logger.info(f"[{message.from_user.id}] ✅✅✅ ВХОД УСПЕШЕН! ✅✅✅")
+        logger.info(f"[{message.from_user.id}] Тип результата: {type(result).__name__}")
+        logger.info(f"[{message.from_user.id}] Пользователь: {result.first_name} {result.last_name or ''}")
 
         await message.answer(
             "✅ Вы успешно авторизованы!\n"
@@ -310,22 +347,29 @@ async def process_code(message: types.Message, state: FSMContext):
         logger.error(f"Неверный номер телефона: {data.get('phone')}")
         await message.answer("❌ Неверный номер телефона. Начните заново: /start")
         await state.clear()
-    except errors.PhoneCodeInvalid:
-        logger.warning(f"[User {message.from_user.id}] Неверный код: {code}")
+    except errors.PhoneCodeInvalid as e:
+        logger.warning(f"[{message.from_user.id}] ========== ОШИБКА: НЕВЕРНЫЙ КОД ==========")
+        logger.warning(f"[{message.from_user.id}] Введенный код: '{code}'")
+        logger.warning(f"[{message.from_user.id}] Длина: {len(code)}")
+        logger.warning(f"[{message.from_user.id}] Телефон: {data.get('phone')}")
+        logger.warning(f"[{message.from_user.id}] Исходная ошибка: {e}")
+        logger.warning(f"[{message.from_user.id}] ======================================")
         attempts = (await state.get_data()).get('attempts', 0) + 1
         await state.update_data(attempts=attempts)
         if attempts >= 3:
             await message.answer(
-                "❌ Введено 3 неверных кода.\n"
-                "Начните авторизацию заново: /start"
+                "❌ 3 неверных кода подряд.\n"
+                "Запросите новый код: /start"
             )
             await state.clear()
         else:
             remaining = 3 - attempts
             await message.answer(
-                f"❌ Неверный код ({attempts}/3).\n"
-                f"Осталось попыток: {remaining}\n\n"
-                f"💡 Если кода нет, нажмите кнопку '↻ Повторная отправка'"
+                f"❌ Неверный код ({attempts}/3)\n"
+                f"Осталось: {remaining} попыток\n\n"
+                f"📝 Ввод был: '{code}'\n"
+                f"Убедитесь что это полный код из сообщения Telegram.\n"
+                f"Попробуйте еще раз:"
             )
     except errors.CodeExpired:
         logger.warning(f"[User {message.from_user.id}] Код истёк")
@@ -334,11 +378,14 @@ async def process_code(message: types.Message, state: FSMContext):
             "Нажмите кнопку '↻ Повторная отправка' для получения нового кода."
         )
     except Exception as e:
-        logger.error(f"[User {message.from_user.id}] Ошибка sign_in: {type(e).__name__}: {str(e)}")
+        err_name = type(e).__name__
+        err_msg = str(e)
+        logger.error(f"[{message.from_user.id}] {err_name} при sign_in: {err_msg}")
+        logger.error(f"[{message.from_user.id}] Полная ошибка: {repr(e)}")
         await message.answer(
-            f"❌ Ошибка авторизации:\n"
-            f"{type(e).__name__}\n\n"
-            f"{str(e)[:150]}"
+            f"❌ Ошибка: {err_name}\n\n"
+            f"Детали: {err_msg[:120]}\n\n"
+            f"Попробуйте: /start"
         )
 
 @dp.message(AuthStates.waiting_for_password)
