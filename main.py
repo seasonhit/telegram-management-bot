@@ -228,14 +228,36 @@ async def process_phone(message: types.Message, state: FSMContext):
         # send_code отправляет код на номер телефона
         logger.info(f"[{phone}] Вызов send_code()...")
         sent_code = await client.send_code(phone)
+        
+        logger.info(f"[{phone}] ✅ send_code() успешен!")
+        logger.info(f"[{phone}] sent_code тип: {type(sent_code).__name__}")
+        logger.info(f"[{phone}] sent_code атрибуты: {dir(sent_code)}")
+        logger.info(f"[{phone}] sent_code.__dict__: {sent_code.__dict__ if hasattr(sent_code, '__dict__') else 'NO DICT'}")
+        
+        # Получаем hash - может быть в разных местах
+        if hasattr(sent_code, 'phone_code_hash'):
+            phone_code_hash = sent_code.phone_code_hash
+            logger.info(f"[{phone}] Hash из .phone_code_hash: {phone_code_hash[:20]}... (len={len(phone_code_hash)})")
+        else:
+            logger.error(f"[{phone}] ❌ НЕТ .phone_code_hash в sent_code!")
+            phone_code_hash = None
+        
+        # Получаем тип кода
         code_type = getattr(sent_code, 'type', None)
         type_name = getattr(code_type, 'name', str(code_type)) if code_type else 'UNKNOWN'
-        logger.info(f"[{phone}] ✅ send_code() успешен!")
-        logger.info(f"[{phone}] Тип кода: {type_name}, Hash: {sent_code.phone_code_hash[:15]}...")
+        logger.info(f"[{phone}] Тип кода: {type_name}")
+
+        if not phone_code_hash:
+            await message.answer("❌ Ошибка: не получен hash кода. Попробуйте заново: /start")
+            await state.clear()
+            try:
+                await client.disconnect()
+            except:
+                pass
+            return
 
         # Сохраняем данные
         user_clients[user_id] = client
-        phone_code_hash = sent_code.phone_code_hash
         logger.info(f"[{user_id}] Сохранены данные: phone={phone}, hash_len={len(phone_code_hash)}")
         
         await state.update_data(
@@ -384,14 +406,8 @@ async def process_code(message: types.Message, state: FSMContext):
                 f"Это должна быть строка из уведомления Telegram\n\n"
                 f"Переотправьте код или попробуйте еще раз:"
             )
-    except errors.CodeExpired:
-        logger.warning(f"[User {message.from_user.id}] Код истёк")
-        await message.answer(
-            "❌ Код истёк.\n"
-            "Нажмите кнопку '↻ Повторная отправка' для получения нового кода."
-        )
     except errors.CodeExpired as e:
-        logger.warning(f"[{message.from_user.id}] Код истек: {e}")
+        logger.warning(f"[{message.from_user.id}] ⏰ Код истёк: {e}")
         await message.answer(
             "⏰ Код истёк\n\n"
             "Нажмите '↻ Повторная отправка' для получения нового кода."
