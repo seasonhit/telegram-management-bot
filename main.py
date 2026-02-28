@@ -235,7 +235,20 @@ async def process_phone(message: types.Message, state: FSMContext):
         # Получаем hash - может быть в разных местах
         if hasattr(sent_code, 'phone_code_hash'):
             phone_code_hash = sent_code.phone_code_hash
-            logger.info(f"[{phone}] Hash из .phone_code_hash: {phone_code_hash[:20]}... (len={len(phone_code_hash)})")
+            logger.info(f"[{phone}] 📦 Hash тип: {type(phone_code_hash).__name__}")
+            logger.info(f"[{phone}] 📦 Hash значение: {phone_code_hash}")
+            logger.info(f"[{phone}] 📦 Hash len: {len(phone_code_hash)}")
+            logger.info(f"[{phone}] 📦 Hash repr: {repr(phone_code_hash)}")
+            
+            # Проверяем есть ли это hex
+            if isinstance(phone_code_hash, str):
+                logger.info(f"[{phone}] 📦 Hash is string - декодируем...")
+                # Пробуем декодировать как hex/bytes
+                try:
+                    decoded = bytes.fromhex(phone_code_hash)
+                    logger.info(f"[{phone}] 📦 Decoded bytes len: {len(decoded)}")
+                except:
+                    logger.info(f"[{phone}] 📦 Не hex - это просто строка")
         else:
             logger.error(f"[{phone}] ❌ НЕТ .phone_code_hash в sent_code!")
             phone_code_hash = None
