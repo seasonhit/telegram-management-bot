@@ -437,12 +437,19 @@ async def process_code(message: types.Message, state: FSMContext):
     except Exception as e:
         err_name = type(e).__name__
         err_msg = str(e)
-        logger.error(f"[{message.from_user.id}] ⚠️  НЕОЖИДАННАЯ ОШИБКА: {err_name}")
-        logger.error(f"[{message.from_user.id}] Сообщение: {err_msg[:150]}")
-        logger.error(f"[{message.from_user.id}] Полный traceback: {repr(e)}")
+        err_module = type(e).__module__
+        logger.error(f"[{message.from_user.id}] ⚠️  EXCEPTION: {err_module}.{err_name}")
+        logger.error(f"[{message.from_user.id}] Сообщение: {err_msg}")
+        logger.error(f"[{message.from_user.id}] Тип ошибки: {type(e)}")
+        logger.error(f"[{message.from_user.id}] repr: {repr(e)}")
+        logger.error(f"[{message.from_user.id}] args: {e.args if hasattr(e, 'args') else 'NO ARGS'}")
+        import traceback
+        logger.error(f"[{message.from_user.id}] Traceback:\n{traceback.format_exc()}")
+        
         await message.answer(
-            f"❌ Систем. ошибка: {err_name}\n\n"
-            f"Детали: {err_msg[:100]}\n\n"
+            f"❌ Ошибка система: {err_name}\n\n"
+            f"Детали: {err_msg[:150]}\n\n"
+            f"Система: {err_module}\n\n"
             f"Попробуйте: /start"
         )
 
