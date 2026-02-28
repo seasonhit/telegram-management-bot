@@ -321,11 +321,19 @@ async def process_code(message: types.Message, state: FSMContext):
         logger.info(f"[{message.from_user.id}] Клиент подключен: {client.is_connected}")
         logger.info(f"[{message.from_user.id}] =====================================")
         
+        # Переподключаемся если клиент отключился
+        if not client.is_connected:
+            logger.warning(f"[{message.from_user.id}] ⚠️  Клиент отключился, переподключаем...")
+            await client.connect()
+            logger.info(f"[{message.from_user.id}] ✅ Переподключили клиент")
+        
+        logger.info(f"[{message.from_user.id}] 📤 Отправляем sign_in с параметрами...")
         result = await client.sign_in(
             phone_number=phone,
             phone_code_hash=phone_code_hash,
             phone_code=code
         )
+        logger.info(f"[{message.from_user.id}] ✅ sign_in() вернул результат: {type(result).__name__}")
         logger.info(f"[{message.from_user.id}] ✅✅✅ ВХОД УСПЕШЕН! ✅✅✅")
         logger.info(f"[{message.from_user.id}] Тип результата: {type(result).__name__}")
         logger.info(f"[{message.from_user.id}] Пользователь: {result.first_name} {result.last_name or ''}")
@@ -348,28 +356,33 @@ async def process_code(message: types.Message, state: FSMContext):
         await message.answer("❌ Неверный номер телефона. Начните заново: /start")
         await state.clear()
     except errors.PhoneCodeInvalid as e:
-        logger.warning(f"[{message.from_user.id}] ========== ОШИБКА: НЕВЕРНЫЙ КОД ==========")
+        logger.warning(f"[{message.from_user.id}] ======================================")
+        logger.warning(f"[{message.from_user.id}] ❌ ОШИБКА: PhoneCodeInvalid")
+        logger.warning(f"[{message.from_user.id}] ======================================")
         logger.warning(f"[{message.from_user.id}] Введенный код: '{code}'")
-        logger.warning(f"[{message.from_user.id}] Длина: {len(code)}")
-        logger.warning(f"[{message.from_user.id}] Телефон: {data.get('phone')}")
-        logger.warning(f"[{message.from_user.id}] Исходная ошибка: {e}")
+        logger.warning(f"[{message.from_user.id}] Длина кода: {len(code)}")
+        logger.warning(f"[{message.from_user.id}] Телефон из state: {data.get('phone')}")
+        logger.warning(f"[{message.from_user.id}] Hash из state: {data.get('phone_code_hash', 'NOT_SET')[:15]}...")
+        logger.warning(f"[{message.from_user.id}] Клиент подключен: {client.is_connected if client else 'NO CLIENT'}")
+        logger.warning(f"[{message.from_user.id}] Исходная ошибка Pyrogram: {str(e)[:200]}")
+        logger.warning(f"[{message.from_user.id}] Полный traceback: {repr(e)}")
         logger.warning(f"[{message.from_user.id}] ======================================")
         attempts = (await state.get_data()).get('attempts', 0) + 1
         await state.update_data(attempts=attempts)
         if attempts >= 3:
             await message.answer(
                 "❌ 3 неверных кода подряд.\n"
-                "Запросите новый код: /start"
+                "Попросите новый код: /start"
             )
             await state.clear()
         else:
             remaining = 3 - attempts
             await message.answer(
                 f"❌ Неверный код ({attempts}/3)\n"
-                f"Осталось: {remaining} попыток\n\n"
-                f"📝 Ввод был: '{code}'\n"
-                f"Убедитесь что это полный код из сообщения Telegram.\n"
-                f"Попробуйте еще раз:"
+                f"Осталось попыток: {remaining}\n\n"
+                f"ℹ️ Вы ввели: '{code}'\n"
+                f"Это должна быть строка из уведомления Telegram\n\n"
+                f"Переотправьте код или попробуйте еще раз:"
             )
     except errors.CodeExpired:
         logger.warning(f"[User {message.from_user.id}] Код истёк")
@@ -377,14 +390,28 @@ async def process_code(message: types.Message, state: FSMContext):
             "❌ Код истёк.\n"
             "Нажмите кнопку '↻ Повторная отправка' для получения нового кода."
         )
+    except errors.CodeExpired as e:
+        logger.warning(f"[{message.from_user.id}] Код истек: {e}")
+        await message.answer(
+            "⏰ Код истёк\n\n"
+            "Нажмите '↻ Повторная отправка' для получения нового кода."
+        )
+    except errors.BadRequest as e:
+        logger.error(f"[{message.from_user.id}] BadRequest при sign_in: {e}")
+        await message.answer(
+            f"❌ Ошибка запроса: {str(e)[:80]}\n\n"
+            "Начните заново: /start"
+        )
+        await state.clear()
     except Exception as e:
         err_name = type(e).__name__
         err_msg = str(e)
-        logger.error(f"[{message.from_user.id}] {err_name} при sign_in: {err_msg}")
-        logger.error(f"[{message.from_user.id}] Полная ошибка: {repr(e)}")
+        logger.error(f"[{message.from_user.id}] ⚠️  НЕОЖИДАННАЯ ОШИБКА: {err_name}")
+        logger.error(f"[{message.from_user.id}] Сообщение: {err_msg[:150]}")
+        logger.error(f"[{message.from_user.id}] Полный traceback: {repr(e)}")
         await message.answer(
-            f"❌ Ошибка: {err_name}\n\n"
-            f"Детали: {err_msg[:120]}\n\n"
+            f"❌ Систем. ошибка: {err_name}\n\n"
+            f"Детали: {err_msg[:100]}\n\n"
             f"Попробуйте: /start"
         )
 
