@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 # --- Конфигурация ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-WORK_DIR = "/home/ubuntu/telegram_bot/"
+WORK_DIR = os.getenv("WORK_DIR", "/workspaces/telegram-management-bot/.bot_data/")
 DEVELOPERS = "YTSmailDog, SmailLabs"
 
 # --- База данных ---
@@ -88,7 +88,10 @@ def get_main_kb():
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
 def get_auth_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔐 Начать авторизацию", callback_data="start_auth")]])
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔐 Начать авторизацию", callback_data="start_auth")],
+        [InlineKeyboardButton(text="Получить токен (my.telegram.org)", url="http://my.telegram.org")]
+    ])
 
 def get_ghost_kb(user_id):
     enabled = get_ghost_mode(user_id)
@@ -102,7 +105,12 @@ def get_ghost_kb(user_id):
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
-    await message.answer(f"👋 Привет! Разработчики: {DEVELOPERS}\nИспользуйте меню ниже:", reply_markup=get_main_kb())
+    user_name = message.from_user.first_name or "Друже"
+    await message.answer(
+        f"👋 Добро пожаловать, {user_name}!\nВыберите функцию из меню ниже.\n\nЕсли нужен токен или доступ к API — используйте команду /token или кнопку 'Получить токен (my.telegram.org)'.",
+        reply_markup=get_main_kb()
+    )
+    logger.info(f"Пользователь {message.from_user.id} ({user_name}) запустил бота")
 
 @dp.callback_query(F.data == "start_auth")
 async def start_auth(callback: types.CallbackQuery, state: FSMContext):
@@ -110,6 +118,19 @@ async def start_auth(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.answer("Введите API ID:")
     await state.set_state(AuthStates.waiting_for_api_id)
     await callback.answer()
+
+
+@dp.message(Command("token"))
+async def cmd_token(message: types.Message):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Открыть my.telegram.org", url="http://my.telegram.org")]
+    ])
+    text = (
+        "Откройте http://my.telegram.org для доступа к API ID и API Hash.\n"
+        "Для получения Bot Token создайте бота на my.telegram.org и/или используйте @BotFather в Telegram, выполнив /newbot.\n"
+        "Инструкция: https://core.telegram.org/bots#3-how-do-i-create-a-bot"
+    )
+    await message.answer(text, reply_markup=kb)
 
 @dp.message(AuthStates.waiting_for_api_id)
 async def process_api_id(message: types.Message, state: FSMContext):
@@ -127,48 +148,135 @@ async def process_api_hash(message: types.Message, state: FSMContext):
 @dp.message(AuthStates.waiting_for_phone)
 async def process_phone(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    phone = message.text.strip().replace(" ", "")
+    phone = message.text.strip()
+    if not phone.startswith('+'): phone = '+' + phone
     user_id = message.from_user.id
     
     # Очистка старой сессии
     session_path = os.path.join(WORK_DIR, f"session_{user_id}.session")
     if os.path.exists(session_path): os.remove(session_path)
     
-    client = Client(name=f"session_{user_id}", api_id=int(data['api_id']), api_hash=data['api_hash'], phone_number=phone, workdir=WORK_DIR)
+    client = Client(
+        name=f"session_{user_id}",
+        api_id=int(data['api_id']),
+        api_hash=data['api_hash'],
+        phone_number=phone,
+        workdir=WORK_DIR,
+        in_memory=False
+    )
+    
     try:
+        logger.info(f"[{phone}] Подключение...")
         await client.connect()
-        code_info = await client.send_code(phone)
-        await state.update_data(phone=phone, phone_code_hash=code_info.phone_code_hash)
+        logger.info(f"[{phone}] Отправка кода...")
+        await message.answer(f"⏳ Отправляю код на {phone}...")
+        
+        # send_code возвращает SentCode с phone_code_hash
+        sent_code = await client.send_code(phone)
+        logger.info(f"[{phone}] Код отправлен. Hash: {sent_code.phone_code_hash[:10]}...")
+        
+        # Сохраняем данные
         user_clients[user_id] = client
-        await message.answer("Введите код из Telegram:")
+        await state.update_data(
+            phone=phone,
+            phone_code_hash=sent_code.phone_code_hash
+        )
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Отправить код повторно", callback_data="resend_code")]])
+        await message.answer(
+            f"✅ Код отправлен на {phone}\n" +
+            f"📱 Введите код из SMS или уведомления Telegram:",
+            reply_markup=kb
+        )
         await state.set_state(AuthStates.waiting_for_code)
     except Exception as e:
-        await message.answer(f"Ошибка: {e}")
+        logger.error(f"[{phone}] Ошибка send_code: {type(e).__name__}: {str(e)[:100]}")
+        try:
+            await client.disconnect()
+        except:
+            pass
+        await message.answer(
+            f"❌ Ошибка подключения:\n{str(e)[:80]}\n\n" +
+            f"Проверьте:\n" +
+            f"• API ID (на my.telegram.org)\n" +
+            f"• API Hash (на my.telegram.org)\n" +
+            f"• Номер телефона (формат: +7ХХХХХХХХХХ)"
+        )
         await state.clear()
 
 @dp.message(AuthStates.waiting_for_code)
 async def process_code(message: types.Message, state: FSMContext):
     data = await state.get_data()
     client = user_clients.get(message.from_user.id)
-    if not client: return await message.answer("Ошибка сессии. /start")
+    if not client or not client.is_connected: 
+        logger.error(f"[User {message.from_user.id}] Клиент не подключен")
+        return await message.answer("❌ Ошибка: Клиент отключен. Нажмите /start")
+    
+    import re
+    code = message.text.strip().replace(" ", "").replace("-", "")
+    if not re.match(r'^[A-Za-z0-9]{4,10}$', code):
+        return await message.answer("❌ Неверный формат кода. Код должен содержать 4–10 букв/цифр. Попробуйте ещё раз:")
+    
     try:
-        await client.sign_in(data['phone'], data['phone_code_hash'], message.text.strip().replace(" ", ""))
-        await message.answer("✅ Авторизовано!", reply_markup=get_main_kb())
+        logger.info(f"[User {message.from_user.id}] Проверка кода: {code}")
+        result = await client.sign_in(phone_number=data['phone'], phone_code_hash=data['phone_code_hash'], phone_code=code)
+        logger.info(f"[User {message.from_user.id}] ✅ ВХОД УСПЕШЕН! Тип: {type(result).__name__}")
+        
+        await message.answer(
+            "✅ Вы успешно авторизованы!\\n" +
+            "Теперь можете использовать все функции бота.",
+            reply_markup=get_main_kb()
+        )
         await state.clear()
     except errors.SessionPasswordNeeded:
-        await message.answer("Введите пароль 2FA:")
+        logger.info(f"[User {message.from_user.id}] 2FA требуется")
+        await message.answer("🔐 На аккаунте включена 2-фактор аутентификация.\\nВведите пароль:")
         await state.set_state(AuthStates.waiting_for_password)
+    except errors.PhoneCodeInvalid:
+        logger.warning(f"[User {message.from_user.id}] ❌ Неверный код")
+        attempts = (await state.get_data()).get('attempts', 0) + 1
+        await state.update_data(attempts=attempts)
+        if attempts >= 3:
+            await message.answer("❌ Слишком много попыток. Начните заново: /start")
+            await state.clear()
+        else:
+            await message.answer(f"❌ Неверный код ({attempts}/3).\\nПопробуйте еще раз:")
+    except errors.CodeExpired:
+        await message.answer("❌ Код истёк. Нажмите кнопку 'Отправить код повторно' или запустите /start")
     except Exception as e:
-        await message.answer(f"Ошибка: {e}")
+        logger.error(f"[User {message.from_user.id}] ❌ Ошибка sign_in: {type(e).__name__}: {str(e)[:80]}")
+        await message.answer(f"❌ Ошибка авторизации:\\n{str(e)[:80]}")
+    except errors.PhoneNumberInvalid:
+        logger.error(f"Неверный номер телефона: {data['phone']}")
+        await message.answer("❌ Неверный номер телефона. Попробуйте снова с /start")
+        await state.clear()
+    except Exception as e:
+        logger.error(f"Ошибка входа: {type(e).__name__}: {e}")
+        await message.answer(f"❌ Ошибка: {str(e)[:100]}")
 
 @dp.message(AuthStates.waiting_for_password)
 async def process_password(message: types.Message, state: FSMContext):
     client = user_clients.get(message.from_user.id)
+    if not client or not client.is_connected:
+        logger.error("Клиент не подключен при проверке пароля")
+        return await message.answer("❌ Ошибка сессии. /start")
+    
     try:
-        await client.check_password(message.text.strip())
-        await message.answer("✅ Авторизовано!", reply_markup=get_main_kb())
+        result = await client.check_password(message.text.strip())
+        logger.info(f"Пользователь {message.from_user.id} прошел 2FA. Результат: {type(result).__name__}")
+        await message.answer("✅ Авторизовано успешно! 2FA пройдена.", reply_markup=get_main_kb())
         await state.clear()
-    except Exception as e: await message.answer(f"Ошибка: {e}")
+    except errors.PasswordHashInvalid:
+        logger.warning(f"Неверный пароль для {message.from_user.id}")
+        await message.answer("❌ Неверный пароль 2FA. Попробуйте еще раз:")
+    except errors.PasswordEmpty:
+        logger.warning(f"Пароль не установлен для {message.from_user.id}")
+        await message.answer("❌ На аккаунте не установлен пароль 2FA, но требуется. Попробуйте с начала.")
+        await state.clear()
+    except Exception as e: 
+        logger.error(f"Ошибка 2FA: {type(e).__name__}: {e}")
+        await message.answer(f"❌ Ошибка: {str(e)[:100]}")
+        await state.clear()
 
 # --- Функции меню ---
 
@@ -201,6 +309,29 @@ async def ghost_toggle(callback: types.CallbackQuery):
     await callback.message.edit_reply_markup(reply_markup=get_ghost_kb(callback.from_user.id))
     await callback.answer("Статус изменен")
 
+
+@dp.callback_query(F.data == "resend_code")
+async def handle_resend_code(callback: types.CallbackQuery, state: FSMContext):
+    uid = callback.from_user.id
+    data = await state.get_data()
+    client = user_clients.get(uid)
+    if not client or not client.is_connected:
+        await callback.answer("❌ Клиент не подключен. Начните заново: /start", show_alert=True)
+        return
+    phone = data.get('phone')
+    phone_code_hash = data.get('phone_code_hash')
+    if not phone or not phone_code_hash:
+        await callback.answer("❌ Нет данных для повторной отправки. Начните заново: /start", show_alert=True)
+        return
+    try:
+        sent = await client.resend_code(phone, phone_code_hash)
+        await state.update_data(phone_code_hash=sent.phone_code_hash)
+        await callback.message.answer(f"✅ Код отправлен повторно на {phone}")
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"Ошибка при повторной отправке кода для {uid}: {e}")
+        await callback.answer(f"❌ Не удалось отправить код повторно: {e}", show_alert=True)
+
 @dp.message(F.text == "🧹 Очистка")
 async def clear_start(message: types.Message, state: FSMContext):
     await message.answer("Введите ID/username чата для очистки (удалит последние 100 ваших сообщений):")
@@ -224,7 +355,10 @@ async def clear_process(message: types.Message, state: FSMContext):
 
 @dp.message(F.text == "🔄 Перезапуск")
 async def restart(message: types.Message):
-    await message.answer("🔄 Перезапуск...")
+    logger.warning(f"Запрос перезапуска от пользователя {message.from_user.id}")
+    await message.answer("🔄 Бот перезапускается...")
+    await asyncio.sleep(0.5)
+    logger.info("🔄 БОТ ПЕРЕЗАПУЩЕН")
     os.execv(sys.executable, ['python3'] + sys.argv)
 
 # --- Универсальный обработчик для текста и эмодзи ---
