@@ -32,10 +32,26 @@ def init_db():
     cursor.execute('CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, user_id INTEGER, text TEXT)')
     cursor.execute('CREATE TABLE IF NOT EXISTS scheduled_messages (id INTEGER PRIMARY KEY, user_id INTEGER, chat_id TEXT, text TEXT, send_at DATETIME)')
     cursor.execute('CREATE TABLE IF NOT EXISTS ghost_mode (user_id INTEGER PRIMARY KEY, enabled INTEGER DEFAULT 0)')
+    cursor.execute('CREATE TABLE IF NOT EXISTS user_api (user_id INTEGER PRIMARY KEY, api_id INTEGER, api_hash TEXT)')
     conn.commit()
     conn.close()
 
 init_db()
+
+def get_user_api(user_id):
+    conn = sqlite3.connect(os.path.join(WORK_DIR, 'bot_data.db'))
+    cursor = conn.cursor()
+    cursor.execute("SELECT api_id, api_hash FROM user_api WHERE user_id = ?", (user_id,))
+    res = cursor.fetchone()
+    conn.close()
+    return res if res else (None, None)
+
+def save_user_api(user_id, api_id, api_hash):
+    conn = sqlite3.connect(os.path.join(WORK_DIR, 'bot_data.db'))
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR REPLACE INTO user_api (user_id, api_id, api_hash) VALUES (?, ?, ?)", (user_id, api_id, api_hash))
+    conn.commit()
+    conn.close()
 
 def get_ghost_mode(user_id):
     conn = sqlite3.connect(os.path.join(WORK_DIR, 'bot_data.db'))
@@ -55,7 +71,6 @@ def set_ghost_mode(user_id, enabled):
 # --- Состояния FSM ---
 class AuthStates(StatesGroup):
     waiting_for_api_id = State()
-    waiting_for_api_hash = State()
     waiting_for_phone = State()
     waiting_for_code = State()
     waiting_for_password = State()
@@ -124,8 +139,22 @@ async def cmd_start(message: types.Message, state: FSMContext):
 @dp.callback_query(F.data == "start_auth")
 async def start_auth(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
-    await callback.message.answer("Введите API ID:")
-    await state.set_state(AuthStates.waiting_for_api_id)
+    user_id = callback.from_user.id
+    api_id, api_hash = get_user_api(user_id)
+    
+    if api_id and api_hash:
+        # Используем сохраненные значения
+        await state.update_data(api_id=str(api_id), api_hash=api_hash)
+        await callback.message.answer("Введите номер телефона (+7...):")
+        await state.set_state(AuthStates.waiting_for_phone)
+    else:
+        # Запрашиваем API ID и Hash
+        await callback.message.answer(
+            "Вставьте API ID и API Hash из http://my.telegram.org в формате:\n"
+            "API_ID API_HASH\n\n"
+            "Например:\n12345678 abc123def456..."
+        )
+        await state.set_state(AuthStates.waiting_for_api_id)
     await callback.answer()
 
 
@@ -143,14 +172,23 @@ async def cmd_token(message: types.Message):
 
 @dp.message(AuthStates.waiting_for_api_id)
 async def process_api_id(message: types.Message, state: FSMContext):
-    if not message.text.isdigit(): return await message.answer("API ID должен быть числом:")
-    await state.update_data(api_id=message.text.strip())
-    await message.answer("Введите API Hash:")
-    await state.set_state(AuthStates.waiting_for_api_hash)
-
-@dp.message(AuthStates.waiting_for_api_hash)
-async def process_api_hash(message: types.Message, state: FSMContext):
-    await state.update_data(api_hash=message.text.strip())
+    parts = message.text.strip().split()
+    if len(parts) < 2:
+        return await message.answer(
+            "❌ Неправильный формат. Введите в одной строке:\n"
+            "API_ID API_HASH"
+        )
+    
+    api_id_str, api_hash = parts[0], parts[1]
+    if not api_id_str.isdigit():
+        return await message.answer("❌ API ID должен быть числом. Попробуйте еще раз:")
+    
+    user_id = message.from_user.id
+    api_id = int(api_id_str)
+    save_user_api(user_id, api_id, api_hash)
+    logger.info(f"[User {user_id}] Сохранены API ID: {api_id}, API Hash: {api_hash[:10]}...")
+    
+    await state.update_data(api_id=api_id_str, api_hash=api_hash)
     await message.answer("Введите номер телефона (+7...):")
     await state.set_state(AuthStates.waiting_for_phone)
 
